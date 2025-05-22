@@ -1,0 +1,60 @@
+api_keys:
+  huggingface_token: 
+  roboflow_api_key: 
+
+models:
+  # Primary models (Roboflow)
+  field_detection_model_id: football-field-detection-f07vi/14
+  player_detection_model_id: football-players-detection-3zvbc/11
+  
+  # Backup models (Ultralytics)
+  detection_backup: "yolov8x.pt"  # Backup YOLOv8 model for detection
+  pose: "yolo11l-pose.pt"  # Path to YOLOv8 pose model
+  segmentation: "sam2_b.pt"  # Path to SAM model
+  
+  # Team classification
+  team_classifier: "google/siglip-base-patch16-224"  # Model for team classification
+
+classes:
+  players: [0, 1]  # Class IDs for players in the model
+  goalkeepers: [2, 3]  # Class IDs for goalkeepers 
+  referees: [4]  # Class IDs for referees
+  ball: [5]  # Class ID for ball
+
+tracking:
+  tracker: "bytetrack"  # Tracking algorithm (bytetrack, botsort)
+  smoothing_length: 5  # Number of frames for smoothing detections
+  smoothing_enabled: true
+
+visualization:
+  box_color: "#22c55e"  # Default box color
+  label_color: "#000000"  # Label text color
+  trace_length: 30  # Number of frames for motion trace
+  team_colors:
+    team_1: "#00BFFF"  # Team 1 color (light blue)
+    team_2: "#FF1493"  # Team 2 color (pink)
+    referee: "#FFD700"  # Referee color (gold)
+  ball_color: "#FFD700"  # Ball color
+  pitch_view_width: 600
+  pitch_view_height: 800
+  show_voronoi: true  # Enable Voronoi diagram
+  voronoi_alpha: 0.3  # Transparency of Voronoi overlay
+
+possession:
+  proximity_threshold: 50  # Distance threshold for possession detection
+  possession_frames: 3  # Number of frames for stable possession
+  highlight_color: "#00FF00"  # Color to highlight player with possession
+
+processing:
+  resolution: [1080, 1080]  # Width, height for processing
+  output_resolution: [1920, 1080]  # Width, height for output
+
+video:
+  input_path: "videos/football.mp4"
+  output_path: "output/result.mp4"
+  fps: 30
+  stride: 1  # Process every nth frame
+  
+performance:
+  device: "cuda"  # "cuda" or "cpu"
+  batch_size: 1

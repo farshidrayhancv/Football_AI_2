@@ -1,0 +1,7 @@
+*.pt
+*.json
+videos/*
+output/*
+__pycache__/*
+node_modules/*
+config.yaml
