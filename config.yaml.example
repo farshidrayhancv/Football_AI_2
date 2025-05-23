@@ -9,19 +9,147 @@ api_keys:
 models:
   # Roboflow models
   player_detection_model_id: "football-players-detection-3zvbc/11"
-  field_detection_model_id: "football-field-detection-f07vi/14"
+  field_detection_model_id: "football-field-detection-f07vi/14"  # Fallback if custom model fails
+  
+  # Custom field detection settings
+  use_custom_field_detection: true  # Set to true to use your custom YOLO model
+  custom_field_model: "field_pose_640_yolo11s_pose.pt"  # Path to your trained YOLO model
   
   # Ultralytics models
-  pose_model: "yolo11n-pose.pt"
+  pose_model: "yolo11n-pose.pt"  # For human pose estimation
   sam_model: "sam2.1_s.pt"
   
   # Team classification model
   siglip_model_path: "google/siglip-base-patch16-224"
 
-# Detection settings
+# Keypoint mapping for custom YOLO field detection model
+# Maps your model's keypoint indices to pitch vertex indices
+# Only needed if use_custom_field_detection is true
+keypoint_mapping:
+  mapping:
+    # Example mapping - adjust based on your model's training:
+    0: 0    # Model keypoint 0 -> Pitch corner (top-left)
+    1: 1    # Model keypoint 1 -> Pitch corner (top-right)
+    2: 2    # Model keypoint 2 -> Pitch corner (bottom-right)
+    3: 3    # Model keypoint 3 -> Pitch corner (bottom-left)
+    4: 4    # Model keypoint 4 -> Center circle
+    5: 5    # Model keypoint 5 -> Penalty area left
+    6: 6    # Model keypoint 6 -> Penalty area right
+    7: 7    # Model keypoint 7 -> Halfway line
+    8: 8    # Model keypoint 8 -> Goal left
+    9: 9    # Model keypoint 9 -> Goal right
+    10: 10  # Model keypoint 10 -> Center spot
+    11: 11  # Model keypoint 11 -> Corner left
+    12: 12  # Model keypoint 12 -> Corner right
+    13: 13  # Model keypoint 13 -> Goal area left
+    14: 14  # Model keypoint 14 -> Goal area right
+    15: 15  # Model keypoint 15 -> Penalty spot left
+    16: 16  # Model keypoint 16 -> Penalty spot right
+    17: 17  # Model keypoint 17 -> Halfway line center
+    18: 18  # Model keypoint 18 -> Center circle edge
+    19: 19  # Model keypoint 19 -> Penalty area left edge
+    20: 20  # Model keypoint 20 -> Penalty area right edge
+    21: 21  # Model keypoint 21 -> Goal area left edge
+    22: 22  # Model keypoint 22 -> Goal area right edge
+    23: 23  # Model keypoint 23 -> Corner left edge
+    24: 24  # Model keypoint 24 -> Corner right edge
+    25: 25  # Model keypoint 25 -> Goal left edge
+    26: 26  # Model keypoint 26 -> Goal right edge
+    27: 27  # Model keypoint 27 -> Penalty spot left edge
+    28: 28  # Model keypoint 28 -> Penalty spot right edge
+    29: 29  # Model keypoint 29 -> Halfway line center edge
+    30: 30  # Model keypoint 30 -> Center circle edge left
+    31: 31  # Model keypoint 31 -> Center circle edge right
+    # Add more mappings as needed for penalty areas, center circle, etc.
+    # Run keypoint_mapping_helper.py to visualize and create proper mapping
+
+
+# Detection settings with adaptive padding
 detection:
-  confidence_threshold: 0.3
-  keypoint_confidence_threshold: 0.5
+  confidence_threshold: 0.6
+  keypoint_confidence_threshold: 0.7
+  
+  # Adaptive padding configuration (NEW IN V2)
+  adaptive_padding:
+    # Master switch - set to false to use fixed padding like original V2
+    enable: true
+    
+    # If adaptive is disabled, use this fixed ratio for all boxes
+    fixed_padding_ratio: 0.1  # 10% padding when adaptive is off
+    
+    # Reference frame size for normalization (defaults to HD)
+    reference_frame_width: 1920
+    reference_frame_height: 1080
+    
+    # Size thresholds for categorizing players by distance
+    # (normalized box area relative to frame)
+    size_thresholds:
+      very_small: 0.001   # < 0.1% of frame area (very distant players)
+      small: 0.005        # 0.1% - 0.5% of frame area (distant players)
+      medium: 0.02        # 0.5% - 2% of frame area (medium distance)
+      # large: anything above medium (close players)
+    
+    # Padding configuration for pose estimation
+    pose_padding:
+      # Padding ratios for each size category
+      very_small: 0.5     # 50% padding for tiny players
+      small: 0.35          # 30% padding for small players
+      medium: 0.25         # 20% padding for medium players
+      large: 0.15          # 10% padding for close players
+      
+      # Minimum padding in pixels (ensures adequate context)
+      min_pixels_x: 20
+      min_pixels_y: 30
+      
+      # Optional: Maximum padding limits
+      max_pixels_x: 200   # Never exceed 200 pixels padding horizontally
+      max_pixels_y: 200   # Never exceed 200 pixels padding vertically
+    
+    # Padding configuration for segmentation (SAM)
+    segmentation_padding:
+      # Generally less padding than pose
+      very_small: 0.4     # 40% for tiny players
+      small: 0.3          # 30% for small players
+      medium: 0.2        # 20% for medium players
+      large: 0.15          # 15% for close players
+      
+      # Minimum padding for segmentation
+      min_pixels_x: 15
+      min_pixels_y: 20
+      
+      # Optional: Maximum limits
+      max_pixels_x: 150
+      max_pixels_y: 150
+    
+    # Global multiplier - affects all padding calculations
+    # Useful for quick adjustments without changing individual ratios
+    adaptive_padding_multiplier: 1.0  # 1.5 = 50% more padding everywhere, 0.8 = 20% less
+    
+    # Optional: Maximum padding ratio (safety limit)
+    max_padding_ratio: 0.5  # Never exceed 70% padding regardless of other settings
+    
+    # SAM-specific padding adjustment
+    sam_padding_factor: 0.8  # Use 80% of calculated padding for SAM (it works better with tighter boxes)
+    
+    # Mask post-processing
+    crop_masks: true  # Crop segmentation masks to remove padding artifacts
+    
+    # Advanced: Distance-based scaling (optional)
+    use_distance_estimation: true  # Enable for additional refinement
+    distance_based_scaling:
+      very_far: 1.2       # 20% boost for very distant players
+      far: 1.1            # 10% boost for far players
+      medium: 1.0         # No change for medium distance
+      near: 0.9           # 10% reduction for very close players
+
+
+# Resolution settings for different models
+resolution:
+  object_detection: [640, 640]    # Player/ball detection
+  pose_estimation: [480, 480]     # Human pose
+  segmentation: [512, 512]        # SAM segmentation
+  field_detection: [640, 640]    # Higher res for accurate field keypoints
+  output: [1920, 1080]              # Output video resolution
 
 # Video settings
 video:
@@ -35,11 +163,11 @@ display:
     team_1: "#0066FF"  # Bright blue
     team_2: "#FF0066"  # Bright red/pink
   referee_color: "#FFD700"  # Gold
-  ball_color: "#FFFF00"     # Yellow
+  ball_color: "#FFFFFF"     # White
   
   # Feature toggles
   show_pose: false
-  show_segmentation: false
+  show_segmentation: true
   segmentation_alpha: 0.6
 
 # Possession detection
@@ -50,3 +178,8 @@ possession_detection:
 # Performance
 performance:
   device: "cuda"  # "cuda" or "cpu"
+
+# Debug settings 
+debug:
+  verbose_field_detection: true  # Detailed field detection logs
+  verbose_transformer: true      # Transformer creation logs
