@@ -1,6 +1,7 @@
 """
 Football AI V2 - Model Management
 Handles Roboflow, YOLO, and SAM models
+Now with support for custom YOLO11n-pose field detection
 """
 
 import numpy as np
@@ -30,6 +31,7 @@ class FootballModels:
         self._load_pose_model()
         self._load_segmentation_model()
         self._load_team_classifier()
+        self._load_field_detection_model()
         
         # Soccer pitch configuration
         self.pitch_config = SoccerPitchConfiguration()
@@ -44,13 +46,54 @@ class FootballModels:
             api_key=self.config['api_keys']['roboflow_api_key']
         )
         
-        # Field detection model
-        self.field_model = get_model(
-            model_id=self.config['models']['field_detection_model_id'],
-            api_key=self.config['api_keys']['roboflow_api_key']
-        )
-        
-        print("✓ Roboflow models loaded")
+        print("✓ Roboflow player detection model loaded")
+    
+    def _load_field_detection_model(self):
+        """Load field detection model - either Roboflow or custom YOLO."""
+        try:
+            # Check if we should use custom YOLO model
+            use_custom_yolo = self.config['models'].get('use_custom_field_detection', False)
+            
+            if use_custom_yolo:
+                # Load custom YOLO11n-pose model trained on pitch keypoints
+                field_model_path = self.config['models'].get('custom_field_model', 'yolo11n-pose-pitch.pt')
+                self.field_model = YOLO(field_model_path)
+                if self.device == 'cuda':
+                    self.field_model.to(self.device)
+                print(f"✓ Custom YOLO field detection model loaded: {field_model_path}")
+                self.use_custom_field_model = True
+                
+                # Get expected number of keypoints from model
+                dummy_frame = np.zeros((640, 640, 3), dtype=np.uint8)
+                dummy_results = self.field_model(dummy_frame, verbose=False)
+                if dummy_results and len(dummy_results) > 0 and hasattr(dummy_results[0], 'keypoints'):
+                    self.num_field_keypoints = dummy_results[0].keypoints.shape[1] if dummy_results[0].keypoints is not None else 0
+                else:
+                    self.num_field_keypoints = 0
+                print(f"  Model outputs {self.num_field_keypoints} keypoints")
+                
+            else:
+                # Original Roboflow model
+                self.field_model = get_model(
+                    model_id=self.config['models']['field_detection_model_id'],
+                    api_key=self.config['api_keys']['roboflow_api_key']
+                )
+                print("✓ Roboflow field detection model loaded")
+                self.use_custom_field_model = False
+                
+        except Exception as e:
+            print(f"Warning: Could not load field detection model: {e}")
+            print("Falling back to Roboflow model...")
+            # Fallback to Roboflow
+            try:
+                self.field_model = get_model(
+                    model_id=self.config['models']['field_detection_model_id'],
+                    api_key=self.config['api_keys']['roboflow_api_key']
+                )
+                self.use_custom_field_model = False
+            except:
+                self.field_model = None
+                self.use_custom_field_model = False
     
     def _load_pose_model(self):
         """Load YOLO pose estimation model."""
@@ -138,17 +181,58 @@ class FootballModels:
             }
     
     def detect_field(self, frame):
-        """Detect field keypoints using Roboflow model."""
+        """Detect field keypoints using either Roboflow or custom YOLO model."""
+        if self.field_model is None:
+            return None
+            
         try:
-            result = self.field_model.infer(
-                frame,
-                confidence=self.config['detection']['keypoint_confidence_threshold']
-            )[0]
-            
-            return sv.KeyPoints.from_inference(result)
-            
+            if self.use_custom_field_model:
+                # Use custom YOLO11n-pose model
+                # Get the resolution for field detection
+                field_res = self.config.get('resolution', {}).get('field_detection', None)
+                
+                # Run inference
+                results = self.field_model(frame, verbose=False)
+                
+                if (results and len(results) > 0 and 
+                    hasattr(results[0], 'keypoints') and 
+                    results[0].keypoints is not None and
+                    hasattr(results[0].keypoints, 'data') and
+                    len(results[0].keypoints.data) > 0):
+                    
+                    # Extract keypoints from YOLO pose format
+                    kpts_data = results[0].keypoints.data[0].cpu().numpy()  # Shape: (num_keypoints, 3)
+                    
+                    # Convert to supervision KeyPoints format
+                    # YOLO gives us (x, y, confidence) for each keypoint
+                    xy_points = kpts_data[:, :2]  # Get x, y coordinates
+                    confidences = kpts_data[:, 2]  # Get confidence scores
+                    
+                    # Create supervision KeyPoints object
+                    # Note: supervision expects shape (num_objects, num_keypoints, 2) for xy
+                    # and (num_objects, num_keypoints) for confidence
+                    keypoints = sv.KeyPoints(
+                        xy=xy_points[np.newaxis, ...],  # Add batch dimension
+                        confidence=confidences[np.newaxis, ...]  # Add batch dimension
+                    )
+                    
+                    return keypoints
+                else:
+                    print("No keypoints detected in frame")
+                    return None
+                    
+            else:
+                # Original Roboflow implementation
+                result = self.field_model.infer(
+                    frame,
+                    confidence=self.config['detection']['keypoint_confidence_threshold']
+                )[0]
+                return sv.KeyPoints.from_inference(result)
+                
         except Exception as e:
             print(f"Error in field detection: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def create_transformer(self, keypoints):
@@ -159,23 +243,91 @@ class FootballModels:
         try:
             # Filter keypoints by confidence
             confidence_threshold = self.config['detection']['keypoint_confidence_threshold']
-            filter_mask = keypoints.confidence[0] > confidence_threshold
-            frame_points = keypoints.xy[0][filter_mask]
+            all_keypoints = keypoints.xy[0]
+            all_confidences = keypoints.confidence[0]
             
-            # Get corresponding pitch points
-            pitch_points = np.array(self.pitch_config.vertices)[filter_mask]
+            # Get all pitch vertices
+            all_pitch_vertices = np.array(self.pitch_config.vertices)
             
-            if len(frame_points) >= 4:
-                transformer = ViewTransformer(
-                    source=frame_points,
-                    target=pitch_points
-                )
-                return transformer
+            if self.use_custom_field_model:
+                # For custom YOLO model, use keypoint mapping if provided
+                keypoint_mapping = self.config.get('keypoint_mapping', {}).get('mapping', {})
+                
+                if keypoint_mapping:
+                    # Use explicit mapping from config
+                    frame_points = []
+                    pitch_points = []
+                    
+                    for model_idx, pitch_idx in keypoint_mapping.items():
+                        model_idx = int(model_idx)
+                        pitch_idx = int(pitch_idx)
+                        
+                        # Check if this keypoint has high enough confidence
+                        if (model_idx < len(all_keypoints) and 
+                            all_confidences[model_idx] > confidence_threshold):
+                            
+                            frame_points.append(all_keypoints[model_idx])
+                            pitch_points.append(all_pitch_vertices[pitch_idx])
+                    
+                    frame_points = np.array(frame_points)
+                    pitch_points = np.array(pitch_points)
+                    
+                    print(f"Using mapped keypoints: {len(frame_points)} high-confidence points using Custom model")
+                    
+                else:
+                    # No explicit mapping - assume keypoints match pitch vertices order
+                    filter_mask = all_confidences > confidence_threshold
+                    frame_points = all_keypoints[filter_mask]
+                    
+                    # Only use pitch vertices that correspond to detected keypoints
+                    valid_indices = np.where(filter_mask)[0]
+                    if len(valid_indices) <= len(all_pitch_vertices):
+                        pitch_points = all_pitch_vertices[valid_indices]
+                    else:
+                        # More keypoints than pitch vertices - truncate
+                        pitch_points = all_pitch_vertices[:len(frame_points)]
+                    
+                    print(f"Using direct mapping: {len(frame_points)} high-confidence points using Roboflow")
+                    
+            else:
+                # For Roboflow model, use standard filtering
+                filter_mask = all_confidences > confidence_threshold
+                frame_points = all_keypoints[filter_mask]
+                pitch_points = all_pitch_vertices[filter_mask]
             
+            # Validate we have enough points
+            if len(frame_points) < 4:
+                print(f"Not enough high-confidence keypoints: {len(frame_points)}")
+                return None
+            
+            if len(frame_points) != len(pitch_points):
+                print(f"Warning: Mismatch between frame points ({len(frame_points)}) and pitch points ({len(pitch_points)})")
+                # Use minimum common length
+                min_len = min(len(frame_points), len(pitch_points))
+                frame_points = frame_points[:min_len]
+                pitch_points = pitch_points[:min_len]
+            
+            # Create transformer
+            transformer = ViewTransformer(
+                source=frame_points,
+                target=pitch_points
+            )
+            
+            # Validate transformer by testing a known point
+            test_point = np.array([[frame_points[0][0], frame_points[0][1]]])
+            try:
+                transformed = transformer.transform_points(test_point)
+                print(f"✓ Transformer created successfully with {len(frame_points)} points")
+            except:
+                print("Warning: Transformer validation failed")
+            
+            return transformer
+                
         except Exception as e:
             print(f"Error creating transformer: {e}")
-        
-        return None
+            import traceback
+            traceback.print_exc()
+            return None
     
     def estimate_poses(self, frame, detections):
         """Estimate poses for detected humans."""

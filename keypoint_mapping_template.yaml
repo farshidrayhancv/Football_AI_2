@@ -1,0 +1,41 @@
+keypoint_mapping:
+  description: Maps model keypoint indices to pitch vertex indices
+# Keypoint mapping for custom YOLO field detection model
+# Maps your model's keypoint indices to pitch vertex indices
+# Only needed if use_custom_field_detection is true
+  mapping:
+    # Example mapping - adjust based on your model's training:
+    0: 0    # Model keypoint 0 -> Pitch corner (top-left)
+    1: 1    # Model keypoint 1 -> Pitch corner (top-right)
+    2: 2    # Model keypoint 2 -> Pitch corner (bottom-right)
+    3: 3    # Model keypoint 3 -> Pitch corner (bottom-left)
+    4: 4    # Model keypoint 4 -> Center circle
+    5: 5    # Model keypoint 5 -> Penalty area left
+    6: 6    # Model keypoint 6 -> Penalty area right
+    7: 7    # Model keypoint 7 -> Halfway line
+    8: 8    # Model keypoint 8 -> Goal left
+    9: 9    # Model keypoint 9 -> Goal right
+    10: 10  # Model keypoint 10 -> Center spot
+    11: 11  # Model keypoint 11 -> Corner left
+    12: 12  # Model keypoint 12 -> Corner right
+    13: 13  # Model keypoint 13 -> Goal area left
+    14: 14  # Model keypoint 14 -> Goal area right
+    15: 15  # Model keypoint 15 -> Penalty spot left
+    16: 16  # Model keypoint 16 -> Penalty spot right
+    17: 17  # Model keypoint 17 -> Halfway line center
+    18: 18  # Model keypoint 18 -> Center circle edge
+    19: 19  # Model keypoint 19 -> Penalty area left edge
+    20: 20  # Model keypoint 20 -> Penalty area right edge
+    21: 21  # Model keypoint 21 -> Goal area left edge
+    22: 22  # Model keypoint 22 -> Goal area right edge
+    23: 23  # Model keypoint 23 -> Corner left edge
+    24: 24  # Model keypoint 24 -> Corner right edge
+    25: 25  # Model keypoint 25 -> Goal left edge
+    26: 26  # Model keypoint 26 -> Goal right edge
+    27: 27  # Model keypoint 27 -> Penalty spot left edge
+    28: 28  # Model keypoint 28 -> Penalty spot right edge
+    29: 29  # Model keypoint 29 -> Halfway line center edge
+    30: 30  # Model keypoint 30 -> Center circle edge left
+    31: 31  # Model keypoint 31 -> Center circle edge right
+    # Add more mappings as needed for penalty areas, center circle, etc.
+    # Run keypoint_mapping_helper.py to visualize and create proper mapping
