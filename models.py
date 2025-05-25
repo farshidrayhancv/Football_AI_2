@@ -1,7 +1,7 @@
 """
 Football AI V2 - Model Management
 Handles Roboflow, YOLO, and SAM models
-Now with support for custom YOLO field detection and adaptive padding
+Now with Hybrid Pose Estimation: Full Frame + SAHI + Dummy Poses
 """
 
 import numpy as np
@@ -44,6 +44,9 @@ class FootballModels:
         
         # Soccer pitch configuration
         self.pitch_config = SoccerPitchConfiguration()
+        
+        # Pose estimation configuration
+        self.pose_confidence_threshold = 0.2  # 20% confidence threshold for small players
         
         print("All models loaded successfully!")
     
@@ -613,29 +616,149 @@ class FootballModels:
                 traceback.print_exc()
             return None
     
+    def _generate_dummy_pose(self, box):
+        """Generate a dummy standing pose for a bounding box."""
+        x1, y1, x2, y2 = box
+        center_x = (x1 + x2) / 2
+        bottom_y = y2
+        top_y = y1
+        height = y2 - y1
+        width = x2 - x1
+        
+        # Create COCO-style standing pose (17 keypoints)
+        head_y = top_y + height * 0.1
+        shoulder_y = top_y + height * 0.25
+        elbow_y = shoulder_y + height * 0.2
+        wrist_y = elbow_y + height * 0.15
+        hip_y = top_y + height * 0.55
+        knee_y = hip_y + height * 0.25
+        ankle_y = bottom_y - height * 0.05
+        
+        keypoints = np.array([
+            [center_x, head_y],  # 0: nose
+            [center_x - width*0.05, head_y - height*0.02],  # 1: left_eye
+            [center_x + width*0.05, head_y - height*0.02],  # 2: right_eye
+            [center_x - width*0.08, head_y],  # 3: left_ear
+            [center_x + width*0.08, head_y],  # 4: right_ear
+            [center_x - width*0.15, shoulder_y],  # 5: left_shoulder
+            [center_x + width*0.15, shoulder_y],  # 6: right_shoulder
+            [center_x - width*0.12, elbow_y],  # 7: left_elbow
+            [center_x + width*0.12, elbow_y],  # 8: right_elbow
+            [center_x - width*0.08, wrist_y],  # 9: left_wrist
+            [center_x + width*0.08, wrist_y],  # 10: right_wrist
+            [center_x - width*0.1, hip_y],  # 11: left_hip
+            [center_x + width*0.1, hip_y],  # 12: right_hip
+            [center_x - width*0.08, knee_y],  # 13: left_knee
+            [center_x + width*0.08, knee_y],  # 14: right_knee
+            [center_x - width*0.06, ankle_y],  # 15: left_ankle
+            [center_x + width*0.06, ankle_y],  # 16: right_ankle
+        ])
+        
+        confidence = np.full(17, 0.6)
+        
+        return {
+            'keypoints': keypoints,
+            'confidence': confidence,
+            'is_dummy': True
+        }
+    
     def estimate_poses(self, frame, detections):
-        """Estimate poses for detected humans with adaptive padding."""
+        """
+        Simplified hybrid pose estimation:
+        1. Full frame pose estimation
+        2. Individual box pose estimation for each detection
+        3. Dummy poses for remaining players
+        """
         if self.pose_model is None or len(detections) == 0:
+            print(f"🔍 Pose: No pose model or no detections ({len(detections)})")
             return []
         
-        poses = []
+        print(f"🔍 Pose: Starting pose estimation for {len(detections)} detections")
+        poses = [None] * len(detections)
         
-        for i, box in enumerate(detections.xyxy):
+        # Stage 1: Full frame pose estimation
+        full_frame_count = 0
+        try:
+            print(f"🔍 Stage 1: Full frame pose estimation...")
+            results = self.pose_model(frame, verbose=False)
+            
+            if (results and len(results) > 0 and 
+                hasattr(results[0], 'keypoints') and 
+                results[0].keypoints is not None and
+                len(results[0].keypoints.data) > 0):
+                
+                full_frame_poses = results[0].keypoints.data.cpu().numpy()
+                print(f"🔍 Stage 1: Found {len(full_frame_poses)} poses in full frame")
+                
+                # Match poses to detections
+                for i, detection_box in enumerate(detections.xyxy):
+                    x1, y1, x2, y2 = detection_box
+                    box_center = np.array([(x1 + x2) / 2, (y1 + y2) / 2])
+                    
+                    best_pose_idx = None
+                    best_distance = float('inf')
+                    
+                    for pose_idx, pose_data in enumerate(full_frame_poses):
+                        if len(pose_data) == 0:
+                            continue
+                        
+                        keypoints = pose_data[:, :2]
+                        confidence = pose_data[:, 2]
+                        
+                        valid_confidences = confidence[confidence > 0]
+                        if len(valid_confidences) == 0:
+                            continue
+                            
+                        avg_confidence = np.mean(valid_confidences)
+                        if avg_confidence < self.pose_confidence_threshold:
+                            continue
+                        
+                        valid_keypoints = keypoints[confidence > 0.3]
+                        if len(valid_keypoints) == 0:
+                            continue
+                        
+                        pose_center = np.mean(valid_keypoints, axis=0)
+                        distance = np.linalg.norm(pose_center - box_center)
+                        
+                        if (x1 <= pose_center[0] <= x2 and y1 <= pose_center[1] <= y2 and 
+                            distance < best_distance):
+                            best_distance = distance
+                            best_pose_idx = pose_idx
+                    
+                    if best_pose_idx is not None:
+                        pose_data = full_frame_poses[best_pose_idx]
+                        poses[i] = {
+                            'keypoints': pose_data[:, :2].copy(),
+                            'confidence': pose_data[:, 2].copy(),
+                            'from_full_frame': True
+                        }
+                        full_frame_count += 1
+                        print(f"🔍 Stage 1: Matched pose to detection {i}")
+                        full_frame_poses[best_pose_idx] = np.array([])  # Mark as used
+        
+        except Exception as e:
+            print(f"❌ Stage 1 error: {e}")
+        
+        print(f"🔍 Stage 1: {full_frame_count}/{len(detections)} poses from full frame")
+        
+        # Stage 2: Individual box pose estimation
+        box_count = 0
+        print(f"🔍 Stage 2: Individual box pose estimation...")
+        
+        for i, detection_box in enumerate(detections.xyxy):
+            if poses[i] is not None:  # Already has pose from full frame
+                continue
+            
             try:
-                # Extract box coordinates
-                x1, y1, x2, y2 = map(int, box)
+                x1, y1, x2, y2 = map(int, detection_box)
                 box_width = x2 - x1
                 box_height = y2 - y1
                 
-                # Skip very small boxes that might be false detections
-                if box_width < 10 or box_height < 10:
-                    poses.append(None)
+                if box_width < 5 or box_height < 5:
                     continue
                 
-                # Calculate adaptive padding based on box size
-                pad_x, pad_y = self.calculate_adaptive_padding(box_width, box_height, mode='pose')
-                
-                # Apply padding with frame boundaries check
+                # Add padding
+                pad_x, pad_y = max(20, int(box_width * 0.3)), max(30, int(box_height * 0.3))
                 x1_pad = max(0, x1 - pad_x)
                 y1_pad = max(0, y1 - pad_y)
                 x2_pad = min(frame.shape[1], x2 + pad_x)
@@ -643,12 +766,10 @@ class FootballModels:
                 
                 # Extract crop
                 crop = frame[y1_pad:y2_pad, x1_pad:x2_pad]
-                
-                if crop.size == 0 or crop.shape[0] < 10 or crop.shape[1] < 10:
-                    poses.append(None)
+                if crop.size == 0:
                     continue
                 
-                # Run pose estimation
+                # Run pose estimation on crop
                 results = self.pose_model(crop, verbose=False)
                 
                 if (results and len(results) > 0 and 
@@ -656,31 +777,57 @@ class FootballModels:
                     results[0].keypoints is not None and
                     len(results[0].keypoints.data) > 0):
                     
-                    # Get keypoints
-                    kpts = results[0].keypoints.data[0].cpu().numpy()
+                    crop_poses = results[0].keypoints.data.cpu().numpy()
                     
-                    # Adjust coordinates back to full frame
-                    pose_data = {
-                        'keypoints': kpts[:, :2].copy(),
-                        'confidence': kpts[:, 2].copy(),
-                        'box_padding': (pad_x, pad_y),  # Store padding info for debugging
-                        'box_size': (box_width, box_height)
-                    }
+                    # Find best pose in crop
+                    best_pose = None
+                    best_confidence = 0
                     
-                    pose_data['keypoints'][:, 0] += x1_pad
-                    pose_data['keypoints'][:, 1] += y1_pad
+                    for pose_data in crop_poses:
+                        if len(pose_data) == 0:
+                            continue
+                        
+                        keypoints = pose_data[:, :2].copy()
+                        confidence = pose_data[:, 2].copy()
+                        
+                        valid_confidences = confidence[confidence > 0]
+                        if len(valid_confidences) == 0:
+                            continue
+                            
+                        avg_confidence = np.mean(valid_confidences)
+                        if avg_confidence >= self.pose_confidence_threshold and avg_confidence > best_confidence:
+                            # Adjust keypoints back to full frame
+                            keypoints[:, 0] += x1_pad
+                            keypoints[:, 1] += y1_pad
+                            
+                            best_pose = {
+                                'keypoints': keypoints,
+                                'confidence': confidence,
+                                'from_box': True
+                            }
+                            best_confidence = avg_confidence
                     
-                    # Validate keypoints are within frame bounds
-                    pose_data['keypoints'][:, 0] = np.clip(pose_data['keypoints'][:, 0], 0, frame.shape[1])
-                    pose_data['keypoints'][:, 1] = np.clip(pose_data['keypoints'][:, 1], 0, frame.shape[0])
-                    
-                    poses.append(pose_data)
-                else:
-                    poses.append(None)
-                    
+                    if best_pose:
+                        poses[i] = best_pose
+                        box_count += 1
+                        print(f"🔍 Stage 2: Found pose for detection {i} (conf: {best_confidence:.2f})")
+            
             except Exception as e:
-                print(f"Error in pose estimation for box {i}: {e}")
-                poses.append(None)
+                print(f"❌ Stage 2 error for detection {i}: {e}")
+                continue
+        
+        print(f"🔍 Stage 2: {box_count} additional poses from individual boxes")
+        
+        # Stage 3: Dummy poses for remaining
+        dummy_count = 0
+        print(f"🔍 Stage 3: Generating dummy poses...")
+        
+        for i, detection_box in enumerate(detections.xyxy):
+            if poses[i] is None:
+                poses[i] = self._generate_dummy_pose(detection_box)
+                dummy_count += 1
+        
+        print(f"🔍 Final: {full_frame_count} full-frame + {box_count} box + {dummy_count} dummy = {len([p for p in poses if p is not None])}/{len(detections)}")
         
         return poses
     
