@@ -63,93 +63,30 @@ keypoint_mapping:
     # Add more mappings as needed for penalty areas, center circle, etc.
     # Run keypoint_mapping_helper.py to visualize and create proper mapping
 
-
-# Detection settings with adaptive padding
+# Detection settings
 detection:
   confidence_threshold: 0.6
   keypoint_confidence_threshold: 0.7
-  
-  # Adaptive padding configuration (NEW IN V2)
-  adaptive_padding:
-    # Master switch - set to false to use fixed padding like original V2
-    enable: true
-    
-    # If adaptive is disabled, use this fixed ratio for all boxes
-    fixed_padding_ratio: 0.1  # 10% padding when adaptive is off
-    
-    # Reference frame size for normalization (defaults to HD)
-    reference_frame_width: 1920
-    reference_frame_height: 1080
-    
-    # Size thresholds for categorizing players by distance
-    # (normalized box area relative to frame)
-    size_thresholds:
-      very_small: 0.001   # < 0.1% of frame area (very distant players)
-      small: 0.005        # 0.1% - 0.5% of frame area (distant players)
-      medium: 0.02        # 0.5% - 2% of frame area (medium distance)
-      # large: anything above medium (close players)
-    
-    # Padding configuration for pose estimation
-    pose_padding:
-      # Padding ratios for each size category
-      very_small: 0.5     # 50% padding for tiny players
-      small: 0.35          # 30% padding for small players
-      medium: 0.25         # 20% padding for medium players
-      large: 0.15          # 10% padding for close players
-      
-      # Minimum padding in pixels (ensures adequate context)
-      min_pixels_x: 20
-      min_pixels_y: 30
-      
-      # Optional: Maximum padding limits
-      max_pixels_x: 200   # Never exceed 200 pixels padding horizontally
-      max_pixels_y: 200   # Never exceed 200 pixels padding vertically
-    
-    # Padding configuration for segmentation (SAM)
-    segmentation_padding:
-      # Generally less padding than pose
-      very_small: 0.4     # 40% for tiny players
-      small: 0.3          # 30% for small players
-      medium: 0.2        # 20% for medium players
-      large: 0.15          # 15% for close players
-      
-      # Minimum padding for segmentation
-      min_pixels_x: 15
-      min_pixels_y: 20
-      
-      # Optional: Maximum limits
-      max_pixels_x: 150
-      max_pixels_y: 150
-    
-    # Global multiplier - affects all padding calculations
-    # Useful for quick adjustments without changing individual ratios
-    adaptive_padding_multiplier: 1.0  # 1.5 = 50% more padding everywhere, 0.8 = 20% less
-    
-    # Optional: Maximum padding ratio (safety limit)
-    max_padding_ratio: 0.5  # Never exceed 70% padding regardless of other settings
-    
-    # SAM-specific padding adjustment
-    sam_padding_factor: 0.8  # Use 80% of calculated padding for SAM (it works better with tighter boxes)
-    
-    # Mask post-processing
-    crop_masks: true  # Crop segmentation masks to remove padding artifacts
-    
-    # Advanced: Distance-based scaling (optional)
-    use_distance_estimation: true  # Enable for additional refinement
-    distance_based_scaling:
-      very_far: 1.2       # 20% boost for very distant players
-      far: 1.1            # 10% boost for far players
-      medium: 1.0         # No change for medium distance
-      near: 0.9           # 10% reduction for very close players
 
+# Pose estimation settings for hybrid approach
+pose_estimation:
+  # Confidence threshold for pose detection (lowered for small players)
+  confidence_threshold: 0.2  # 20% confidence to catch small distant players
+  
+  # Individual box pose estimation settings
+  box_padding_ratio: 0.3  # 30% padding around detection boxes
+  min_padding_pixels: [20, 30]  # Minimum padding [width, height] in pixels
+  
+  # Enable detailed pose logging
+  enable_logging: true
 
 # Resolution settings for different models
 resolution:
-  object_detection: [640, 640]    # Player/ball detection
-  pose_estimation: [480, 480]     # Human pose
-  segmentation: [512, 512]        # SAM segmentation
-  field_detection: [640, 640]    # Higher res for accurate field keypoints
-  output: [1920, 1080]              # Output video resolution
+  object_detection: [1280, 1280]    # Player/ball detection (increased for better small player detection)
+  pose_estimation: [640, 640]       # Human pose (good balance of speed/accuracy)
+  segmentation: [1280, 1280]        # SAM segmentation
+  field_detection: [640, 640]       # Field keypoints
+  output: [1920, 1280]              # Output video resolution
 
 # Video settings
 video:
@@ -166,8 +103,8 @@ display:
   ball_color: "#FFFFFF"     # White
   
   # Feature toggles
-  show_pose: false
-  show_segmentation: true
+  show_pose: true
+  show_segmentation: false
   segmentation_alpha: 0.6
 
 # Possession detection
@@ -181,5 +118,6 @@ performance:
 
 # Debug settings 
 debug:
-  verbose_field_detection: true  # Detailed field detection logs
-  verbose_transformer: true      # Transformer creation logs
+  verbose_field_detection: false     # Reduced logging for cleaner output
+  verbose_transformer: false         # Reduced logging for cleaner output
+  verbose_pose_estimation: false      # Enable pose estimation logging

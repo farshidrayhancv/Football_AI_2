@@ -45,8 +45,24 @@ class FootballModels:
         # Soccer pitch configuration
         self.pitch_config = SoccerPitchConfiguration()
         
-        # Pose estimation configuration
-        self.pose_confidence_threshold = 0.2  # 20% confidence threshold for small players
+        # Pose estimation configuration from config
+        pose_config = self.config.get('pose_estimation', {})
+        self.pose_confidence_threshold = pose_config.get('confidence_threshold', 0.2)
+        
+        # Pose smoothing configuration
+        smoothing_config = pose_config.get('smoothing', {})
+        self.enable_pose_smoothing = smoothing_config.get('enable', True)
+        self.smoothing_window = smoothing_config.get('window_size', 5)
+        
+        # Initialize pose smoothing storage
+        if self.enable_pose_smoothing:
+            self.pose_history = {}  # {tracker_id: [pose1, pose2, ...]}
+            self.max_history_length = self.smoothing_window
+        
+        if self.config.get('debug', {}).get('verbose_pose_estimation', False):
+            print(f"✓ Pose confidence threshold: {self.pose_confidence_threshold}")
+            if self.enable_pose_smoothing:
+                print(f"✓ Pose smoothing enabled with window size: {self.smoothing_window}")
         
         print("All models loaded successfully!")
     
@@ -662,24 +678,191 @@ class FootballModels:
             'is_dummy': True
         }
     
+    def _run_sahi_pose_estimation(self, frame, existing_poses, detections):
+        """Run SAHI pose estimation using supervision's InferenceSlicer."""
+        if self.pose_model is None:
+            return existing_poses
+        
+        try:
+            print(f"🔍 SAHI: Starting SAHI pose estimation on {frame.shape[1]}x{frame.shape[0]} frame")
+            
+            # Create SAHI slicer with proper 2x2 grid (ensure slices are actually smaller than frame)
+            slice_width = max(320, frame.shape[1] // 2)  # Minimum 320px slices
+            slice_height = max(320, frame.shape[0] // 2)  # Minimum 320px slices
+            
+            # Only do SAHI if frame is large enough to benefit from slicing
+            if frame.shape[1] <= slice_width * 1.5 or frame.shape[0] <= slice_height * 1.5:
+                print(f"🔍 SAHI: Frame too small for effective slicing, skipping SAHI")
+                return existing_poses
+            
+            print(f"🔍 SAHI: Using slice size {slice_width}x{slice_height}")
+            
+            slicer = sv.InferenceSlicer(
+                callback=self._pose_callback,
+                slice_wh=(slice_width, slice_height),
+                overlap_wh=(64, 64),  # Fixed overlap in pixels instead of ratio
+                iou_threshold=0.5
+            )
+            
+            # Run SAHI pose estimation
+            sahi_results = slicer(frame)
+            print(f"🔍 SAHI: Slicer returned {len(sahi_results)} detections")
+            
+            # The slicer returns sv.Detections, but we need to run pose estimation
+            # on the detected regions to get keypoints
+            sahi_poses = []
+            
+            if len(sahi_results) > 0:
+                print(f"🔍 SAHI: Processing {len(sahi_results)} SAHI detections for pose estimation")
+                
+                # For each detection from SAHI, extract the region and run pose estimation
+                for i, bbox in enumerate(sahi_results.xyxy):
+                    x1, y1, x2, y2 = bbox.astype(int)
+                    
+                    # Add padding around the detection
+                    pad = 20
+                    x1 = max(0, x1 - pad)
+                    y1 = max(0, y1 - pad)
+                    x2 = min(frame.shape[1], x2 + pad)
+                    y2 = min(frame.shape[0], y2 + pad)
+                    
+                    # Extract region
+                    region = frame[y1:y2, x1:x2]
+                    
+                    if region.size == 0:
+                        continue
+                    
+                    # Run pose estimation on this region
+                    try:
+                        results = self.pose_model(region, verbose=False)
+                        
+                        if (results and len(results) > 0 and 
+                            hasattr(results[0], 'keypoints') and 
+                            results[0].keypoints is not None and
+                            len(results[0].keypoints.data) > 0):
+                            
+                            poses_data = results[0].keypoints.data.cpu().numpy()
+                            
+                            for pose_data in poses_data:
+                                if len(pose_data) > 0:
+                                    keypoints = pose_data[:, :2].copy()
+                                    confidence = pose_data[:, 2].copy()
+                                    
+                                    # Adjust keypoints back to full frame coordinates
+                                    keypoints[:, 0] += x1
+                                    keypoints[:, 1] += y1
+                                    
+                                    # Check confidence threshold
+                                    valid_confidences = confidence[confidence > 0]
+                                    if len(valid_confidences) == 0:
+                                        continue
+                                        
+                                    avg_confidence = np.mean(valid_confidences)
+                                    if avg_confidence >= self.pose_confidence_threshold:
+                                        sahi_poses.append({
+                                            'keypoints': keypoints,
+                                            'confidence': confidence,
+                                            'avg_confidence': avg_confidence,
+                                            'is_sahi': True
+                                        })
+                                        print(f"🔍 SAHI: Added pose from region {i} with confidence {avg_confidence:.2f}")
+                    
+                    except Exception as e:
+                        print(f"🔍 SAHI: Error processing region {i}: {e}")
+                        continue
+            
+            print(f"🔍 SAHI: Total valid SAHI poses: {len(sahi_poses)}")
+            
+            # Match SAHI poses with existing detections
+            updated_poses = existing_poses.copy()
+            matched_count = 0
+            
+            for i, detection_box in enumerate(detections.xyxy):
+                x1, y1, x2, y2 = detection_box
+                box_center = np.array([(x1 + x2) / 2, (y1 + y2) / 2])
+                
+                best_sahi_pose = None
+                best_distance = float('inf')
+                
+                # Find best matching SAHI pose
+                for j, sahi_pose in enumerate(sahi_poses):
+                    valid_keypoints = sahi_pose['keypoints'][sahi_pose['confidence'] > 0.3]
+                    if len(valid_keypoints) == 0:
+                        continue
+                    
+                    pose_center = np.mean(valid_keypoints, axis=0)
+                    distance = np.linalg.norm(pose_center - box_center)
+                    
+                    # Check if pose is within detection box
+                    if (x1 <= pose_center[0] <= x2 and y1 <= pose_center[1] <= y2 and 
+                        distance < best_distance):
+                        best_distance = distance
+                        best_sahi_pose = sahi_pose
+                        print(f"🔍 SAHI: Found matching pose for detection {i} at distance {distance:.1f}")
+                
+                # Update or assign pose
+                if best_sahi_pose:
+                    if (i < len(updated_poses) and updated_poses[i] is not None and 
+                        not updated_poses[i].get('is_dummy', False)):
+                        # Improve existing pose if SAHI has higher confidence
+                        existing_confidence = np.mean(updated_poses[i]['confidence'][updated_poses[i]['confidence'] > 0])
+                        if best_sahi_pose['avg_confidence'] > existing_confidence:
+                            updated_poses[i] = {
+                                'keypoints': best_sahi_pose['keypoints'],
+                                'confidence': best_sahi_pose['confidence'],
+                                'box_padding': updated_poses[i].get('box_padding', (0, 0)),
+                                'box_size': updated_poses[i].get('box_size', (x2-x1, y2-y1)),
+                                'improved_by_sahi': True
+                            }
+                            matched_count += 1
+                            print(f"🔍 SAHI: Improved existing pose for detection {i} (old: {existing_confidence:.2f}, new: {best_sahi_pose['avg_confidence']:.2f})")
+                    else:
+                        # Assign new pose from SAHI
+                        if i < len(updated_poses):
+                            updated_poses[i] = {
+                                'keypoints': best_sahi_pose['keypoints'],
+                                'confidence': best_sahi_pose['confidence'],
+                                'box_padding': (0, 0),
+                                'box_size': (x2-x1, y2-y1),
+                                'from_sahi': True
+                            }
+                            matched_count += 1
+                            print(f"🔍 SAHI: Assigned new pose to detection {i} (confidence: {best_sahi_pose['avg_confidence']:.2f})")
+            
+            print(f"🔍 SAHI: Matched {matched_count} SAHI poses to detections")
+            return updated_poses
+            
+        except Exception as e:
+            print(f"❌ Error in SAHI pose estimation: {e}")
+            import traceback
+            traceback.print_exc()
+            return existing_poses
+    
     def estimate_poses(self, frame, detections):
         """
-        Simplified hybrid pose estimation:
+        Hybrid pose estimation with 2 stages:
         1. Full frame pose estimation
         2. Individual box pose estimation for each detection
         3. Dummy poses for remaining players
         """
         if self.pose_model is None or len(detections) == 0:
-            print(f"🔍 Pose: No pose model or no detections ({len(detections)})")
+            if self.config.get('debug', {}).get('verbose_pose_estimation', False):
+                print(f"🔍 Pose: No pose model or no detections ({len(detections)})")
             return []
         
-        print(f"🔍 Pose: Starting pose estimation for {len(detections)} detections")
+        verbose = self.config.get('debug', {}).get('verbose_pose_estimation', False)
+        pose_config = self.config.get('pose_estimation', {})
+        
+        if verbose:
+            print(f"🔍 Pose: Starting pose estimation for {len(detections)} detections")
+        
         poses = [None] * len(detections)
         
         # Stage 1: Full frame pose estimation
         full_frame_count = 0
         try:
-            print(f"🔍 Stage 1: Full frame pose estimation...")
+            if verbose:
+                print(f"🔍 Stage 1: Full frame pose estimation...")
             results = self.pose_model(frame, verbose=False)
             
             if (results and len(results) > 0 and 
@@ -688,7 +871,8 @@ class FootballModels:
                 len(results[0].keypoints.data) > 0):
                 
                 full_frame_poses = results[0].keypoints.data.cpu().numpy()
-                print(f"🔍 Stage 1: Found {len(full_frame_poses)} poses in full frame")
+                if verbose:
+                    print(f"🔍 Stage 1: Found {len(full_frame_poses)} poses in full frame")
                 
                 # Match poses to detections
                 for i, detection_box in enumerate(detections.xyxy):
@@ -733,17 +917,25 @@ class FootballModels:
                             'from_full_frame': True
                         }
                         full_frame_count += 1
-                        print(f"🔍 Stage 1: Matched pose to detection {i}")
+                        if verbose:
+                            print(f"🔍 Stage 1: Matched pose to detection {i}")
                         full_frame_poses[best_pose_idx] = np.array([])  # Mark as used
         
         except Exception as e:
-            print(f"❌ Stage 1 error: {e}")
+            if verbose:
+                print(f"❌ Stage 1 error: {e}")
         
-        print(f"🔍 Stage 1: {full_frame_count}/{len(detections)} poses from full frame")
+        if verbose:
+            print(f"🔍 Stage 1: {full_frame_count}/{len(detections)} poses from full frame")
         
         # Stage 2: Individual box pose estimation
         box_count = 0
-        print(f"🔍 Stage 2: Individual box pose estimation...")
+        if verbose:
+            print(f"🔍 Stage 2: Individual box pose estimation...")
+        
+        # Get padding settings from config
+        padding_ratio = pose_config.get('box_padding_ratio', 0.3)
+        min_padding = pose_config.get('min_padding_pixels', [20, 30])
         
         for i, detection_box in enumerate(detections.xyxy):
             if poses[i] is not None:  # Already has pose from full frame
@@ -757,8 +949,9 @@ class FootballModels:
                 if box_width < 5 or box_height < 5:
                     continue
                 
-                # Add padding
-                pad_x, pad_y = max(20, int(box_width * 0.3)), max(30, int(box_height * 0.3))
+                # Add padding based on config
+                pad_x = max(min_padding[0], int(box_width * padding_ratio))
+                pad_y = max(min_padding[1], int(box_height * padding_ratio))
                 x1_pad = max(0, x1 - pad_x)
                 y1_pad = max(0, y1 - pad_y)
                 x2_pad = min(frame.shape[1], x2 + pad_x)
@@ -810,26 +1003,142 @@ class FootballModels:
                     if best_pose:
                         poses[i] = best_pose
                         box_count += 1
-                        print(f"🔍 Stage 2: Found pose for detection {i} (conf: {best_confidence:.2f})")
+                        if verbose:
+                            print(f"🔍 Stage 2: Found pose for detection {i} (conf: {best_confidence:.2f})")
             
             except Exception as e:
-                print(f"❌ Stage 2 error for detection {i}: {e}")
+                if verbose:
+                    print(f"❌ Stage 2 error for detection {i}: {e}")
                 continue
         
-        print(f"🔍 Stage 2: {box_count} additional poses from individual boxes")
+        if verbose:
+            print(f"🔍 Stage 2: {box_count} additional poses from individual boxes")
         
         # Stage 3: Dummy poses for remaining
         dummy_count = 0
-        print(f"🔍 Stage 3: Generating dummy poses...")
+        if verbose:
+            print(f"🔍 Stage 3: Generating dummy poses...")
         
         for i, detection_box in enumerate(detections.xyxy):
             if poses[i] is None:
                 poses[i] = self._generate_dummy_pose(detection_box)
                 dummy_count += 1
         
-        print(f"🔍 Final: {full_frame_count} full-frame + {box_count} box + {dummy_count} dummy = {len([p for p in poses if p is not None])}/{len(detections)}")
+        if verbose:
+            print(f"🔍 Final: {full_frame_count} full-frame + {box_count} box + {dummy_count} dummy = {len([p for p in poses if p is not None])}/{len(detections)}")
         
         return poses
+    
+    def smooth_poses(self, poses, detections):
+        """
+        Smooth poses over time using tracking IDs to reduce flickering.
+        Uses temporal averaging of keypoint positions.
+        """
+        if not self.enable_pose_smoothing or not hasattr(detections, 'tracker_id') or detections.tracker_id is None:
+            return poses
+        
+        verbose = self.config.get('debug', {}).get('verbose_pose_estimation', False)
+        smoothed_poses = []
+        
+        for i, pose in enumerate(poses):
+            if pose is None or i >= len(detections.tracker_id):
+                smoothed_poses.append(pose)
+                continue
+            
+            tracker_id = int(detections.tracker_id[i])
+            
+            # Initialize history for new tracker
+            if tracker_id not in self.pose_history:
+                self.pose_history[tracker_id] = []
+            
+            # Add current pose to history
+            self.pose_history[tracker_id].append({
+                'keypoints': pose['keypoints'].copy(),
+                'confidence': pose['confidence'].copy(),
+                'timestamp': len(self.pose_history[tracker_id])
+            })
+            
+            # Keep only recent history
+            if len(self.pose_history[tracker_id]) > self.max_history_length:
+                self.pose_history[tracker_id].pop(0)
+            
+            # Apply smoothing if we have enough history
+            if len(self.pose_history[tracker_id]) >= 2:
+                smoothed_pose = self._apply_temporal_smoothing(tracker_id, pose)
+                if verbose and len(self.pose_history[tracker_id]) >= 3:
+                    if i == 0:  # Only log for first detection to avoid spam
+                        print(f"🔍 Smoothing: Applied to {len([p for p in poses if p is not None])} poses using {len(self.pose_history)} tracked players")
+                smoothed_poses.append(smoothed_pose)
+            else:
+                smoothed_poses.append(pose)
+        
+        # Clean up old tracker histories (remove trackers not seen recently)
+        self._cleanup_pose_history(detections)
+        
+        return smoothed_poses
+    
+    def _apply_temporal_smoothing(self, tracker_id, current_pose):
+        """Apply temporal smoothing to a pose using its history."""
+        history = self.pose_history[tracker_id]
+        
+        if len(history) < 2:
+            return current_pose
+        
+        # Weights for temporal smoothing (more recent = higher weight)
+        weights = np.linspace(0.3, 1.0, len(history))
+        weights = weights / np.sum(weights)
+        
+        # Get keypoints from history
+        keypoints_history = np.array([h['keypoints'] for h in history])
+        confidence_history = np.array([h['confidence'] for h in history])
+        
+        # Smooth keypoints using weighted average
+        smoothed_keypoints = np.zeros_like(current_pose['keypoints'])
+        smoothed_confidence = np.zeros_like(current_pose['confidence'])
+        
+        for kp_idx in range(len(current_pose['keypoints'])):
+            # Only smooth keypoints with sufficient confidence
+            valid_mask = confidence_history[:, kp_idx] > 0.3
+            
+            if np.sum(valid_mask) >= 2:  # Need at least 2 valid points
+                valid_keypoints = keypoints_history[valid_mask, kp_idx]
+                valid_weights = weights[valid_mask]
+                valid_weights = valid_weights / np.sum(valid_weights)
+                
+                # Weighted average of positions
+                smoothed_keypoints[kp_idx] = np.average(valid_keypoints, weights=valid_weights, axis=0)
+                
+                # Use confidence from most recent frame
+                smoothed_confidence[kp_idx] = confidence_history[-1, kp_idx]
+            else:
+                # Not enough valid points, use current
+                smoothed_keypoints[kp_idx] = current_pose['keypoints'][kp_idx]
+                smoothed_confidence[kp_idx] = current_pose['confidence'][kp_idx]
+        
+        # Create smoothed pose
+        smoothed_pose = current_pose.copy()
+        smoothed_pose['keypoints'] = smoothed_keypoints
+        smoothed_pose['confidence'] = smoothed_confidence
+        smoothed_pose['smoothed'] = True
+        
+        return smoothed_pose
+    
+    def _cleanup_pose_history(self, detections):
+        """Remove pose history for trackers not seen recently."""
+        if not hasattr(detections, 'tracker_id') or detections.tracker_id is None:
+            return
+        
+        # Get current active tracker IDs
+        current_trackers = set(int(tid) for tid in detections.tracker_id)
+        
+        # Remove trackers not seen in current frame (they'll be re-added if they reappear)
+        trackers_to_remove = []
+        for tracker_id in self.pose_history.keys():
+            if tracker_id not in current_trackers:
+                trackers_to_remove.append(tracker_id)
+        
+        for tracker_id in trackers_to_remove:
+            del self.pose_history[tracker_id]
     
     def segment_players(self, frame, detections):
         """
