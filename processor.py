@@ -1,6 +1,7 @@
 """
 Football AI V2 - Simple Multi-Resolution Core Processing Logic
 Different resolutions for different models to manage GPU memory and performance
+MODIFIED: Integrated with data exporter for Blender visualization
 """
 
 import cv2
@@ -11,10 +12,11 @@ import os
 
 from models import FootballModels
 from visualizer import FootballVisualizer
+from data_exporter import FootballDataExporter  # NEW IMPORT
 
 
 class FootballProcessor:
-    """Main processor with simple per-model resolution control."""
+    """Main processor with simple per-model resolution control and data export."""
     
     def __init__(self, config, device='cuda'):
         """Initialize processor."""
@@ -40,6 +42,9 @@ class FootballProcessor:
         
         # Initialize visualizer
         self.visualizer = FootballVisualizer(config)
+        
+        # Initialize data exporter (NEW)
+        self.data_exporter = FootballDataExporter(config)
         
         # Initialize tracker
         self.tracker = sv.ByteTrack(track_activation_threshold=0.8)
@@ -153,6 +158,9 @@ class FootballProcessor:
         
         print(f"Processing video: {original_width}x{original_height}, {fps} fps, {total_frames} frames")
         
+        # Set video metadata for exporter (NEW)
+        self.data_exporter.set_video_metadata(original_width, original_height, fps, total_frames)
+        
         # Create video writer with configured output resolution
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out_width = self.output_res[0]
@@ -181,7 +189,18 @@ class FootballProcessor:
                     continue
                 
                 # Process frame
-                result_frame = self.process_frame(frame)
+                result_frame, frame_data = self.process_frame(frame, frame_count)  # MODIFIED
+                
+                # Export frame data (NEW)
+                if frame_data:
+                    self.data_exporter.export_frame_data(
+                        frame_number=frame_count,
+                        detections=frame_data['detections'],
+                        poses=frame_data['poses'],
+                        field_keypoints=frame_data['field_keypoints'],
+                        transformer=frame_data['transformer'],
+                        possession_info=frame_data['possession_info']
+                    )
                 
                 # Resize to output resolution
                 if result_frame.shape[:2] != (out_height, out_width):
@@ -201,6 +220,9 @@ class FootballProcessor:
         # Cleanup
         cap.release()
         out.release()
+        
+        # Save exported data (NEW)
+        self.data_exporter.save_data()
         
         print(f"Processing complete! Output saved to: {output_path}")
     
@@ -253,7 +275,7 @@ class FootballProcessor:
         else:
             print("Warning: No player crops found for team classification")
     
-    def process_frame(self, frame):
+    def process_frame(self, frame, frame_number=0):  # MODIFIED - added frame_number parameter
         """Process a single frame using different resolutions for different models."""
         original_shape = frame.shape
         
@@ -361,7 +383,16 @@ class FootballProcessor:
         # Step 11: Combine views
         combined_frame = self.visualizer.combine_views(annotated_frame, tactical_view)
         
-        return combined_frame
+        # NEW: Prepare frame data for export
+        frame_data = {
+            'detections': detections,
+            'poses': poses,
+            'field_keypoints': field_keypoints,
+            'transformer': self.transformer,
+            'possession_info': possession_info
+        }
+        
+        return combined_frame, frame_data  # MODIFIED - return both frame and data
     
     # Helper methods (same as before)
     def _merge_human_detections(self, detections):
