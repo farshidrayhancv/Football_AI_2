@@ -319,6 +319,9 @@ class FootballProcessor:
             # Scale poses back to original resolution
             all_poses = self._scale_poses(all_poses, pose_scale)
             
+            # Apply pose smoothing using tracking IDs (supervision DetectionsSmoother style)
+            all_poses = self.models.smooth_poses(all_poses, human_detections)
+            
             # Split poses back to categories
             poses = self._split_poses_by_category(all_poses, detections)
         
