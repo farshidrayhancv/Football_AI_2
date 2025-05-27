@@ -369,7 +369,8 @@ class FootballProcessor:
         
         # Step 8: Update ball trail
         self._update_ball_trail(detections['ball'], self.transformer)
-        
+
+                
         # Step 9: Create visualization
         annotated_frame = self.visualizer.annotate_frame(
             frame, detections, poses, segments, possession_info

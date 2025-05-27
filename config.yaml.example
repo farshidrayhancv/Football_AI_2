@@ -127,3 +127,63 @@ debug:
   verbose_field_detection: false     # Reduced logging for cleaner output
   verbose_transformer: false         # Reduced logging for cleaner output
   verbose_pose_estimation: false      # Enable pose estimation logging
+
+
+
+# NEW: Data Export for Blender Visualization
+export:
+  # Enable/disable data export (set to false by default to avoid large files)
+  enable: true
+  
+  # Output path for exported JSON data
+  output_path: "output/analysis_data.json"
+  
+  # Export settings
+  settings:
+    # Include pose keypoints (can be large)
+    include_poses: true
+    
+    # Include segmentation masks (not recommended - very large files)
+    include_segmentation: false
+    
+    # Frame sampling (export every nth frame to reduce file size)
+    frame_sampling: 1  # 1 = every frame, 2 = every other frame, etc.
+    
+    # Coordinate precision (decimal places)
+    coordinate_precision: 2
+    
+    # Confidence thresholds for export
+    min_detection_confidence: 0.3
+    min_pose_confidence: 0.3
+    min_keypoint_confidence: 0.5
+
+# Blender Visualization Settings (for reference)
+blender:
+  # These settings are for reference when using the Blender script
+  visualization:
+    # Pitch dimensions (meters)
+    pitch_length: 105.0
+    pitch_width: 68.0
+    
+    # Player object settings
+    player_height: 2.0
+    player_radius: 0.5
+    
+    # Ball settings
+    ball_radius: 0.11  # Official football radius in meters
+    
+    # Animation settings
+    frame_interpolation: "LINEAR"  # LINEAR, BEZIER, etc.
+    
+    # Camera settings
+    camera_height: 60.0
+    camera_distance: 80.0
+    camera_angle: 45.0  # degrees
+    
+    # Colors (RGB 0-1)
+    colors:
+      team_1: [0.0, 0.4, 1.0]      # Blue
+      team_2: [1.0, 0.0, 0.4]      # Red  
+      referee: [1.0, 0.8, 0.0]     # Gold
+      ball: [1.0, 1.0, 1.0]        # White
+      pitch: [0.2, 0.8, 0.3]       # Green
